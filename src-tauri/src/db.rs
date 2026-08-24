@@ -6,6 +6,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
+const QUOTA_PARSER_VERSION: i64 = 2;
+
 pub fn open_database(database_path: &Path) -> Result<Connection, String> {
     let db = Connection::open(database_path).map_err(|error| error.to_string())?;
     db.pragma_update(None, "journal_mode", "WAL")
@@ -41,6 +43,7 @@ pub fn open_database(database_path: &Path) -> Result<Connection, String> {
           rows_json TEXT NOT NULL,
           prompt_title TEXT,
           quota_usage_json TEXT,
+          quota_parser_version INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
         "#,
@@ -63,6 +66,12 @@ pub fn open_database(database_path: &Path) -> Result<Connection, String> {
         "session_file_rollups",
         "prompt_title",
         "ALTER TABLE session_file_rollups ADD COLUMN prompt_title TEXT",
+    )?;
+    ensure_column(
+        &db,
+        "session_file_rollups",
+        "quota_parser_version",
+        "ALTER TABLE session_file_rollups ADD COLUMN quota_parser_version INTEGER NOT NULL DEFAULT 0",
     )?;
     Ok(db)
 }
@@ -90,6 +99,12 @@ pub struct SessionRollupRecord {
     pub modified_at_ms: i64,
     pub size_bytes: i64,
     pub rows: Vec<DailyUsageRow>,
+    pub prompt_title: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionHierarchyRecord {
+    pub path: String,
     pub prompt_title: Option<String>,
 }
 
@@ -236,9 +251,9 @@ pub fn query_session_file_rollup(
         r#"
         SELECT rows_json, prompt_title, quota_usage_json
         FROM session_file_rollups
-        WHERE path = ? AND modified_at_ms = ? AND size_bytes = ?
+        WHERE path = ? AND modified_at_ms = ? AND size_bytes = ? AND quota_parser_version = ?
         "#,
-        params![path, modified_at_ms, size_bytes],
+        params![path, modified_at_ms, size_bytes, QUOTA_PARSER_VERSION],
         |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -300,6 +315,30 @@ pub fn query_session_rollup_record(
     }
 }
 
+pub fn query_session_hierarchy_records(
+    db: &Connection,
+) -> Result<Vec<SessionHierarchyRecord>, String> {
+    let mut statement = db
+        .prepare(
+            r#"
+            SELECT path, prompt_title
+            FROM session_file_rollups
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(SessionHierarchyRecord {
+                path: row.get(0)?,
+                prompt_title: row.get(1)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
 pub fn upsert_session_file_rollups(
     db: &mut Connection,
     rollups: &[SessionFileRollup],
@@ -317,14 +356,16 @@ pub fn upsert_session_file_rollups(
                   rows_json,
                   prompt_title,
                   quota_usage_json,
+                  quota_parser_version,
                   updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                   modified_at_ms = excluded.modified_at_ms,
                   size_bytes = excluded.size_bytes,
                   rows_json = excluded.rows_json,
                   prompt_title = excluded.prompt_title,
                   quota_usage_json = excluded.quota_usage_json,
+                  quota_parser_version = excluded.quota_parser_version,
                   updated_at = excluded.updated_at
                 "#,
             )
@@ -347,6 +388,7 @@ pub fn upsert_session_file_rollups(
                     rows_json,
                     rollup.prompt_title,
                     quota_usage_json,
+                    QUOTA_PARSER_VERSION,
                     updated_at
                 ])
                 .map_err(|error| error.to_string())?;
@@ -531,6 +573,12 @@ pub fn query_session_details(db: &Connection) -> Result<Vec<SessionDetailRow>, S
                 path,
                 session_id,
                 thread_name: prompt_title.filter(|title| !title.is_empty()),
+                agent_session_id: None,
+                parent_session_id: None,
+                agent_depth: 0,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
                 modified_at_ms,
                 size_bytes,
                 input_tokens,
@@ -623,6 +671,38 @@ mod tests {
             .iter()
             .any(|column| column == "quota_usage_json");
         assert!(has_quota_usage_json);
+        let has_quota_parser_version = db
+            .prepare("PRAGMA table_info(session_file_rollups)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .iter()
+            .any(|column| column == "quota_parser_version");
+        assert!(has_quota_parser_version);
+
+        db.execute(
+            r#"
+            INSERT INTO session_file_rollups (
+              path,
+              modified_at_ms,
+              size_bytes,
+              rows_json,
+              prompt_title,
+              quota_usage_json,
+              quota_parser_version,
+              updated_at
+            ) VALUES ('/tmp/legacy-quota.jsonl', 1, 2, '[]', '', '{}', 1, '2026-08-21T00:00:00.000Z')
+            "#,
+            [],
+        )
+        .unwrap();
+        assert!(
+            query_session_file_rollup(&db, "/tmp/legacy-quota.jsonl", 1, 2)
+                .unwrap()
+                .is_none()
+        );
         let _ = std::fs::remove_file(path);
     }
 

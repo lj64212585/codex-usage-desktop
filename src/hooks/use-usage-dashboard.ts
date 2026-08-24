@@ -101,6 +101,11 @@ export type UpdateProgressState = {
   finished: boolean;
 };
 
+type ScanMessage = {
+  key: string;
+  values?: Record<string, string | number>;
+};
+
 const emptyUpdateProgress: UpdateProgressState = {
   downloaded: 0,
   total: null,
@@ -131,7 +136,7 @@ export function useUsageDashboard() {
   const [codexLimits, setCodexLimits] = useState<CodexLimitsResponse | null>(null);
   const [codexLimitsError, setCodexLimitsError] = useState<string | null>(null);
   const [codexQuotaForecast, setCodexQuotaForecast] = useState<CodexQuotaForecastResponse | null>(null);
-  const [scanMessage, setScanMessage] = useState(() => t("hero.sync_logs_to_cache_desc", { defaultValue: "Sync local logs to cache" }));
+  const [scanMessage, setScanMessage] = useState<ScanMessage>({ key: "hero.sync_logs_to_cache_desc" });
   const [error, setError] = useState<string | null>(null);
   const [bootstrapped, setBootstrapped] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -309,12 +314,14 @@ export function useUsageDashboard() {
       const scan = refresh.scan;
       const filesReused = scan.metrics?.filesReused ?? 0;
       const filesParsed = scan.metrics?.filesParsed ?? 0;
-      setScanMessage(t("hero.synced_message", {
+      setScanMessage({
+        key: "hero.synced_message",
+        values: {
         days: scan.importedDays,
         reused: filesReused,
         parsed: filesParsed,
-        defaultValue: `Synced ${scan.importedDays} days (${filesReused} cached, ${filesParsed} parsed)`
-      }));
+        },
+      });
 
       if (refresh.limits) {
         setCodexLimits(refresh.limits);
@@ -362,7 +369,7 @@ export function useUsageDashboard() {
     try {
       await scanAndReloadOverview(startedAt, { force: hasExpiredCodexLimitWindow(codexLimits) });
     } catch (scanError) {
-      setError(scanError instanceof Error ? scanError.message : "Background refresh failed.");
+      setError(errorMessage(scanError, "Background refresh failed."));
     }
   });
 
@@ -513,7 +520,7 @@ export function useUsageDashboard() {
 
     const startedAt = performance.now();
     void scanAndReloadOverview(startedAt).catch((scanError: unknown) => {
-      setError(scanError instanceof Error ? scanError.message : "Background refresh failed.");
+      setError(errorMessage(scanError, "Background refresh failed."));
     });
 
     void runBackgroundUpdateCheck();
@@ -807,7 +814,7 @@ export function useUsageDashboard() {
       await scanAndReloadOverview(startedAt, { force: true });
       await loadCodexQuotaForecast();
     } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : "Refresh failed.");
+      setError(errorMessage(refreshError, "Refresh failed."));
     } finally {
       setIsRefreshing(false);
     }
@@ -823,13 +830,13 @@ export function useUsageDashboard() {
 
     setIsResetting(true);
     setMonthlyUsage(null);
-    setScanMessage(t("hero.resetting_message", { defaultValue: "Resetting local cache and rebuilding usage data." }));
+    setScanMessage({ key: "hero.resetting_message" });
     const startedAt = performance.now();
 
     try {
       await resetUsageState();
       await scanAndReloadOverview(startedAt, { force: true });
-      setScanMessage(t("hero.reset_rebuilt_message", { defaultValue: "Reset local cache and rebuilt usage data from local Codex logs." }));
+      setScanMessage({ key: "hero.reset_rebuilt_message" });
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : "Reset failed.");
     } finally {
@@ -851,11 +858,10 @@ export function useUsageDashboard() {
 
     try {
       const exported = await exportUsage(range, format, selectedPath);
-      setScanMessage(t("hero.exported_message", {
-        range: getRangeLabel(range, t),
-        path: exported.path,
-        defaultValue: `Exported ${getRangeLabel(range, t)} to ${exported.path}.`
-      }));
+      setScanMessage({
+        key: "hero.exported_message",
+        values: { range: getRangeLabel(range, t), path: exported.path },
+      });
       setError(null);
     } catch (exportError) {
       setError(exportError instanceof Error ? exportError.message : "Export failed.");
@@ -978,7 +984,7 @@ export function useUsageDashboard() {
     codexLimits,
     codexLimitsError,
     codexQuotaForecast,
-    scanMessage,
+    scanMessage: t(scanMessage.key, scanMessage.values),
     error,
     isLoading,
     isMonthlyLoading,

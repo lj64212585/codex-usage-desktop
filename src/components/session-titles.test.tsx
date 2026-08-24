@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProjectSessionsModal } from "./project-sessions-modal";
 import { SessionDetailModal } from "./session-detail-modal";
 import { SessionUsageTable } from "./session-usage-table";
-import type { SessionDetailRow } from "@/lib/api";
+import type { SessionDetailRow, SessionReplayDetail } from "@/lib/api";
 import i18n from "@/i18n";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -47,13 +47,79 @@ function session(overrides: Partial<SessionDetailRow>): SessionDetailRow {
   };
 }
 
+function replayDetail(overrides: Partial<SessionReplayDetail>): SessionReplayDetail {
+  return {
+    path: "/tmp/root.jsonl",
+    sessionId: "root-id",
+    threadName: "Root session",
+    modifiedAtMs: 0,
+    sizeBytes: 0,
+    rawJsonl: "",
+    agents: [],
+    summary: {
+      startTime: null, endTime: null, durationMs: null, timeToFirstTokenMs: null,
+      cwd: null, projects: [], models: [], cliVersion: null, git: {}, inputTokens: 0,
+      cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0,
+      costUSD: 0, turnCount: 0, messageCount: 0, toolCallCount: 0, patchCount: 0, errorCount: 0,
+    },
+    turns: [],
+    ...overrides,
+  };
+}
+
 describe("session daily usage", () => {
-  it("shows daily quota windows, low-resolution values, multiple resets, and unavailable data", () => {
+  it("summarizes the 5-hour and weekly quota consumed by every session in a day", () => {
+    const quotaWindow = (delta: number, startPercent: number, hour: number) => ({
+      windowMinutes: 300,
+      resetsAt: "2026-07-15T13:00:00Z",
+      observedStartAt: `2026-07-15T${String(hour).padStart(2, "0")}:00:00Z`,
+      observedEndAt: `2026-07-15T${String(hour + 1).padStart(2, "0")}:00:00Z`,
+      observedStartPercent: startPercent,
+      observedEndPercent: startPercent + delta,
+      observedDeltaPercent: delta,
+      belowResolution: false,
+    });
+    const dailyUsage = (
+      fiveHour: number,
+      weekly: number,
+      fiveHourStartPercent: number,
+      weeklyStartPercent: number,
+      hour: number,
+    ) => [{
+      date: "2026-07-15",
+      inputTokens: 100,
+      cachedInputTokens: 20,
+      outputTokens: 40,
+      reasoningOutputTokens: 0,
+      totalTokens: 140,
+      costUSD: 0.001,
+      models: ["gpt-5"],
+      projects: ["/repo/app"],
+      quotaUsage: {
+        fiveHour: [quotaWindow(fiveHour, fiveHourStartPercent, hour)],
+        weekly: [{ ...quotaWindow(weekly, weeklyStartPercent, hour), windowMinutes: 10_080 }],
+      },
+    }];
+
+    render(<SessionUsageTable sessions={[
+      session({ path: "/tmp/first.jsonl", dailyUsage: dailyUsage(2, 1, 10, 30, 8) }),
+      session({ path: "/tmp/second.jsonl", dailyUsage: dailyUsage(3, 4, 12, 31, 9) }),
+    ]} />);
+
+    const day = document.getElementById("date-group-2026-07-15")!;
+    const summary = within(day).getByTestId("day-quota-summary");
+    expect(summary).toHaveTextContent("5h Used Approx. 5% • 90% → 85%");
+    expect(summary).toHaveTextContent("Weekly Used Approx. 5% • 70% → 65%");
+  });
+
+  it("shows quota color scales, low-resolution values, and multiple resets", () => {
     const window = (delta: number, belowResolution = false) => ({
       windowMinutes: 300,
       resetsAt: "2026-07-15T13:00:00Z",
       observedStartAt: "2026-07-15T08:00:00Z",
       observedEndAt: "2026-07-15T09:00:00Z",
+      observedStartPercent: 10,
+      observedEndPercent: 10 + delta,
       observedDeltaPercent: delta,
       belowResolution,
     });
@@ -70,16 +136,20 @@ describe("session daily usage", () => {
         costUSD: 0.001,
         models: ["gpt-5"],
         projects: ["/repo/app"],
-        quotaUsage: { fiveHour: [window(2), window(0, true)], weekly: [] },
+        quotaUsage: { fiveHour: [window(2), window(0, true)], weekly: [window(75)] },
       }],
     })]} />);
 
     const card = screen.getByText("Quota session").closest("article")!;
-    expect(within(card).getByText("5h Approx. +2%")).toBeInTheDocument();
-    expect(within(card).getByText("5h <1%")).toBeInTheDocument();
-    expect(within(card).getByText("Weekly --")).toBeInTheDocument();
+    const fiveHourValues = within(card).getByText("5h").nextElementSibling;
+    expect(fiveHourValues).toHaveClass("flex-col");
+    expect(fiveHourValues).toHaveTextContent("Approx. 2% · 88% left<1% · 90% left");
+    expect(within(card).getByText("Weekly").parentElement).toHaveTextContent("Approx. 75% · 15% left");
     expect(card).not.toHaveTextContent("99%");
-    expect(within(card).getByLabelText("Estimated 5-hour and weekly quota usage")).toHaveAttribute("title", expect.stringContaining("concurrent"));
+    expect(within(card).getByRole("img", { name: "5h usage Approx. 2%, remaining 88%" })).toHaveAttribute("data-quota-tone", "high");
+    expect(within(card).getByRole("img", { name: "5h usage <1%, remaining 90%" })).toHaveAttribute("data-quota-tone", "high");
+    expect(within(card).getByRole("img", { name: "Weekly usage Approx. 75%, remaining 15%" })).toHaveAttribute("data-quota-tone", "low");
+    expect(within(card).getByLabelText("Estimated 5-hour and weekly quota usage and remaining quota")).toHaveAttribute("title", expect.stringContaining("latest observed snapshot"));
   });
 
   it("splits resumed usage by rollup date and opens the complete session", async () => {
@@ -136,13 +206,13 @@ describe("session daily usage", () => {
     const sessionCard = within(secondDay!).getByText("fallback-session").closest("article");
     expect(sessionCard).not.toBeNull();
     expect(sessionCard!.querySelector<HTMLElement>("[data-token-segment='input']")!.style.width).toBe(`${(160 / 280) * 100}%`);
-    expect(within(sessionCard!).getByTestId("cost-pill").firstElementChild).toHaveStyle({ width: "100%" });
+    expect(within(sessionCard!).getByTestId("session-cost")).toHaveTextContent("$0.002");
 
     await userEvent.click(within(firstDay!).getByRole("button"));
     const firstDayCard = within(firstDay!).getByText("fallback-session").closest("article")!;
     expect(firstDayCard.querySelector<HTMLElement>("[data-token-segment='input']")!.style.width).toBe(`${(80 / 140) * 100}%`);
-    expect(within(firstDayCard).getByTestId("token-total-pill").firstElementChild).toHaveStyle({ width: "50%" });
-    expect(within(firstDayCard).getByTestId("cost-pill").firstElementChild).toHaveStyle({ width: "50%" });
+    expect(within(firstDayCard).getByTestId("token-total")).toHaveTextContent("140");
+    expect(within(firstDayCard).getByTestId("session-cost")).toHaveTextContent("$0.001");
 
     await userEvent.click(sessionCard!);
     expect(onSessionClick).toHaveBeenCalledWith(resumed);
@@ -188,6 +258,42 @@ describe("session daily usage", () => {
 });
 
 describe("session titles", () => {
+  it("orders subagents beneath their parent and shows their hierarchy metadata", () => {
+    render(<SessionUsageTable sessions={[
+      session({
+        path: "/tmp/child.jsonl",
+        sessionId: "child.jsonl",
+        threadName: "Child task",
+        agentSessionId: "child-id",
+        parentSessionId: "root-id",
+        agentDepth: 1,
+        agentPath: "/root/researcher",
+        agentNickname: "researcher",
+        agentRole: "Research",
+        modifiedAtMs: new Date("2026-07-15T09:00:00Z").getTime(),
+      }),
+      session({
+        path: "/tmp/root.jsonl",
+        sessionId: "root.jsonl",
+        threadName: "Parent task",
+        agentSessionId: "root-id",
+        agentDepth: 0,
+        agentPath: "/root",
+        modifiedAtMs: new Date("2026-07-15T08:00:00Z").getTime(),
+      }),
+    ]} />);
+
+    const cards = screen.getAllByTestId("session-card");
+    expect(cards[0]).toHaveTextContent("Parent task");
+    expect(cards[1]).toHaveTextContent("Child task");
+    expect(cards[1].parentElement).toHaveAttribute("data-agent-depth", "1");
+    expect(within(cards[1]).getByText("Subagent · researcher · Research")).toHaveAttribute(
+      "title",
+      "/root/researcher",
+    );
+    expect(within(cards[0]).queryByText("Subagent")).not.toBeInTheDocument();
+  });
+
   it("shows the summary name with weak file metadata and avoids repeating a fallback ID", () => {
     render(
       <SessionUsageTable
@@ -215,11 +321,11 @@ describe("session titles", () => {
       minute: "2-digit",
     });
     const time = screen.getByText(expectedTime);
-    expect(time.parentElement).toHaveAttribute("title", new Date(modifiedAtMs).toLocaleString());
+    expect(time).toHaveAttribute("title", new Date(modifiedAtMs).toLocaleString());
     expect(time).not.toHaveTextContent("47");
   });
 
-  it("limits project and model badges and exposes complete lists in tooltips", () => {
+  it("limits project and model metadata and exposes complete lists in tooltips", () => {
     render(<SessionUsageTable sessions={[session({
       threadName: "Badge limits",
       projects: ["/repo/one", "/repo/two", "/repo/three"],
@@ -231,11 +337,11 @@ describe("session titles", () => {
     expect(within(card).getByText("one")).toBeInTheDocument();
     expect(within(card).getByText("two")).toBeInTheDocument();
     expect(within(card).queryByText("three")).not.toBeInTheDocument();
-    expect(within(card).getByText("+1", { selector: "span[title='/repo/one\\A /repo/two\\A /repo/three']" })).toBeInTheDocument();
+    expect(within(card).getAllByText("+1")[0]).toHaveAttribute("title", "/repo/one\n/repo/two\n/repo/three");
     expect(within(card).getByText("model-one")).toBeInTheDocument();
     expect(within(card).getByText("model-three")).toBeInTheDocument();
     expect(within(card).queryByText("model-four")).not.toBeInTheDocument();
-    expect(within(card).getByText("+1", { selector: "span[title='model-one, model-two, model-three, model-four']" })).toBeInTheDocument();
+    expect(within(card).getAllByText("+1")[1].parentElement).toHaveAttribute("title", "model-one, model-two, model-three, model-four");
   });
 
   it("uses non-cached input, cached input, and output as non-overlapping token segments", () => {
@@ -256,7 +362,7 @@ describe("session titles", () => {
     expect(cached.style.width).toBe(`${(20 / 140) * 100}%`);
     expect(output.style.width).toBe(`${(40 / 140) * 100}%`);
     expect(within(card).getByRole("img", { name: /80 non-cached input, 20 cached input, 40 output, 140 total/ })).toBeInTheDocument();
-    expect(within(card).getByText("(20.0%)", { selector: "span" })).toBeInTheDocument();
+    expect(within(card).getByText("20", { selector: "strong" })).toBeInTheDocument();
   });
 
   it("keeps tiny non-zero token composition segments visible", () => {
@@ -275,7 +381,7 @@ describe("session titles", () => {
     expect(cached).toHaveStyle({ minWidth: "2px" });
   });
 
-  it("normalizes token composition while scaling total-token and cost pills independently", () => {
+  it("normalizes token composition and shows total tokens and cost inline", () => {
     render(<SessionUsageTable sessions={[
       session({
         path: "/tmp/smaller.jsonl",
@@ -309,16 +415,35 @@ describe("session titles", () => {
     expect(larger.querySelector<HTMLElement>("[data-token-segment='input']")!.style.width).toBe("50%");
     expect(larger.querySelector<HTMLElement>("[data-token-segment='cached']")!.style.width).toBe("10%");
     expect(larger.querySelector<HTMLElement>("[data-token-segment='output']")!.style.width).toBe("40%");
-    expect(within(smaller).getByTestId("token-total-pill").firstElementChild).toHaveStyle({ width: "50%" });
-    expect(within(larger).getByTestId("token-total-pill").firstElementChild).toHaveStyle({ width: "100%" });
-    expect(within(smaller).getByTestId("cost-pill").firstElementChild).toHaveStyle({ width: "25%" });
-    expect(within(larger).getByTestId("cost-pill").firstElementChild).toHaveStyle({ width: "100%" });
-    expect(within(smaller).getByRole("img", { name: /Total tokens 100; 50\.0% of the highest visible session/ })).toBeInTheDocument();
-    expect(within(smaller).getByRole("img", { name: /Cost \$0\.001; 25\.0% of the highest visible session/ })).toBeInTheDocument();
+    expect(within(smaller).getByTestId("token-total")).toHaveTextContent("100");
+    expect(within(larger).getByTestId("token-total")).toHaveTextContent("200");
+    expect(within(smaller).getByTestId("session-cost")).toHaveTextContent("$0.001");
+    expect(within(larger).getByTestId("session-cost")).toHaveTextContent("$0.004");
+    expect(within(smaller).getByTestId("token-total").querySelector<HTMLElement>("[aria-hidden='true']")).toHaveStyle({ width: "50%" });
+    expect(within(larger).getByTestId("token-total").querySelector<HTMLElement>("[aria-hidden='true']")).toHaveStyle({ width: "100%" });
+    expect(within(smaller).getByTestId("session-cost")).toHaveAttribute("data-cost-tone", "low");
+    expect(within(larger).getByTestId("session-cost")).toHaveAttribute("data-cost-tone", "high");
     expect(within(smaller).getByRole("img", { name: /Token breakdown: 40 non-cached input, 20 cached input, 40 output, 100 total$/ })).toBeInTheDocument();
   });
 
-  it("keeps collapsed dates in the shared scale", () => {
+  it("uses compact numbers for million-token session totals", () => {
+    render(<SessionUsageTable sessions={[session({
+      threadName: "Large session",
+      inputTokens: 11_330_000,
+      cachedInputTokens: 11_120_000,
+      outputTokens: 28_100,
+      totalTokens: 11_360_000,
+      costUSD: 7.46,
+      dailyUsage: [],
+    })]} />);
+
+    const card = screen.getByText("Large session").closest("article")!;
+    expect(within(card).getByTestId("token-total")).toHaveTextContent("11.36M");
+    expect(card).toHaveTextContent("Output 28.1K");
+    expect(within(card).getByTestId("session-cost")).toHaveTextContent("$7.46");
+  });
+
+  it("keeps token composition independent of collapsed dates", () => {
     render(<SessionUsageTable sessions={[
       session({
         path: "/tmp/newer.jsonl",
@@ -369,11 +494,11 @@ describe("session titles", () => {
     expect(screen.queryByText("Collapsed older maximum")).not.toBeInTheDocument();
     const visible = screen.getByText("Visible newer session").closest("article")!;
     expect(visible.querySelector<HTMLElement>("[data-token-segment='input']")!.style.width).toBe("100%");
-    expect(within(visible).getByTestId("token-total-pill").firstElementChild).toHaveStyle({ width: "50%" });
-    expect(within(visible).getByTestId("cost-pill").firstElementChild).toHaveStyle({ width: "50%" });
+    expect(within(visible).getByTestId("token-total")).toHaveTextContent("50");
+    expect(within(visible).getByTestId("session-cost")).toHaveTextContent("$0.001");
   });
 
-  it("recalculates maxima after applying the project filter", () => {
+  it("shows inline totals after applying the project filter", () => {
     render(<SessionUsageTable
       selectedProject="/repo/selected"
       sessions={[
@@ -407,8 +532,8 @@ describe("session titles", () => {
     const selected = screen.getByText("Selected project session").closest("article")!;
     expect(screen.queryByText("Other project maximum")).not.toBeInTheDocument();
     expect(selected.querySelector<HTMLElement>("[data-token-segment='input']")!.style.width).toBe("100%");
-    expect(within(selected).getByTestId("token-total-pill").firstElementChild).toHaveStyle({ width: "100%" });
-    expect(within(selected).getByTestId("cost-pill").firstElementChild).toHaveStyle({ width: "100%" });
+    expect(within(selected).getByTestId("token-total")).toHaveTextContent("50");
+    expect(within(selected).getByTestId("session-cost")).toHaveTextContent("$0.001");
   });
 
   it("keeps zero bars empty and makes tiny non-zero values visible", () => {
@@ -451,16 +576,12 @@ describe("session titles", () => {
     const zero = screen.getByText("Zero comparison session").closest("article")!;
     const tiny = screen.getByText("Tiny comparison session").closest("article")!;
     expect(within(zero).getByTestId("token-bar")).toBeEmptyDOMElement();
-    expect(within(zero).getByTestId("token-total-pill").children).toHaveLength(1);
-    expect(within(zero).getByTestId("cost-pill").children).toHaveLength(1);
+    expect(within(zero).getByTestId("token-total")).toHaveTextContent("0");
+    expect(within(zero).getByTestId("session-cost")).toHaveTextContent("$0.00");
     expect(zero.innerHTML).not.toContain("NaN");
     expect(tiny.querySelector<HTMLElement>("[data-token-segment='input']")).toHaveStyle({ width: "100%", minWidth: "2px" });
-    const tinyTokenFill = within(tiny).getByTestId("token-total-pill").firstElementChild as HTMLElement;
-    expect(parseFloat(tinyTokenFill.style.width)).toBeCloseTo(0.01);
-    expect(tinyTokenFill).toHaveStyle({ minWidth: "2px" });
-    const tinyCostFill = within(tiny).getByTestId("cost-pill").firstElementChild as HTMLElement;
-    expect(parseFloat(tinyCostFill.style.width)).toBeCloseTo(0.0001);
-    expect(tinyCostFill).toHaveStyle({ minWidth: "2px" });
+    expect(within(tiny).getByTestId("token-total")).toHaveTextContent("1");
+    expect(within(tiny).getByTestId("session-cost")).toHaveTextContent("$0.00");
   });
 
   it("shows the complete model name in a session card", () => {
@@ -489,12 +610,12 @@ describe("session titles", () => {
 
     const card = screen.getByText("Inactive session").closest("article")!;
     expect(within(card).getByRole("img", { name: "No token activity" })).toBeEmptyDOMElement();
-    expect(within(card).getByRole("img", { name: /Total tokens 0; 0\.0% of the highest visible session/ })).toBeInTheDocument();
-    expect(card.querySelector("[data-cost-tone='zero']")).toHaveTextContent("$0.00");
+    expect(within(card).getByTestId("token-total")).toHaveTextContent("0");
+    expect(within(card).getByTestId("session-cost")).toHaveTextContent("$0.00");
     expect(within(card).getByText("No activity")).toBeInTheDocument();
   });
 
-  it("keeps model colors stable and applies relative zero, low, medium, and high cost tones", () => {
+  it("adds stable model colors and relative cost tones", () => {
     const costSession = (threadName: string, path: string, costUSD: number, model: string) => session({
       threadName,
       path,
@@ -511,12 +632,18 @@ describe("session titles", () => {
     ]} />);
 
     const card = (name: string) => screen.getByText(name, { selector: "h3" }).closest("article")!;
-    expect(card("Zero").querySelector("[data-cost-tone='zero']")).toBeInTheDocument();
-    expect(card("Low").querySelector("[data-cost-tone='low']")).toBeInTheDocument();
-    expect(card("Medium").querySelector("[data-cost-tone='medium']")).toBeInTheDocument();
-    expect(card("High").querySelector("[data-cost-tone='high']")).toBeInTheDocument();
-    const sharedTones = screen.getAllByText("shared-model", { selector: "article span" }).map((badge) => badge.getAttribute("data-model-tone"));
-    expect(sharedTones).toEqual([sharedTones[0], sharedTones[0]]);
+    expect(within(card("Zero")).getByTestId("session-cost")).toHaveTextContent("$0.00");
+    expect(within(card("Low")).getByTestId("session-cost")).toHaveTextContent("$0.001");
+    expect(within(card("Medium")).getByTestId("session-cost")).toHaveTextContent("$0.002");
+    expect(within(card("High")).getByTestId("session-cost")).toHaveTextContent("$0.003");
+    expect(within(card("Zero")).getByTestId("session-cost")).toHaveAttribute("data-cost-tone", "zero");
+    expect(within(card("Low")).getByTestId("session-cost")).toHaveAttribute("data-cost-tone", "low");
+    expect(within(card("Medium")).getByTestId("session-cost")).toHaveAttribute("data-cost-tone", "medium");
+    expect(within(card("High")).getByTestId("session-cost")).toHaveAttribute("data-cost-tone", "high");
+    const sharedModels = screen.getAllByText("shared-model", { selector: "article span" });
+    expect(sharedModels).toHaveLength(2);
+    expect(sharedModels[0]).toHaveAttribute("data-model-tone", sharedModels[1].getAttribute("data-model-tone"));
+    expect(sharedModels[0]).toHaveClass("rounded-full", "border");
   });
 
   it("filters project sessions by summary name", async () => {
@@ -609,6 +736,38 @@ describe("session titles", () => {
     expect(await screen.findByRole("dialog", { name: "fallback-session" })).toBeInTheDocument();
   });
 
+  it("shows the parent-child agent hierarchy and opens a subagent replay", async () => {
+    await i18n.changeLanguage("en");
+    const agents = [
+      { path: "/tmp/root.jsonl", sessionId: "root-id", parentSessionId: null, depth: 0, agentPath: "/root", nickname: null, role: null, threadName: "Root task" },
+      { path: "/tmp/child.jsonl", sessionId: "child-id", parentSessionId: "root-id", depth: 1, agentPath: "/root/research", nickname: "Curie", role: null, threadName: "Research task" },
+      { path: "/tmp/grandchild.jsonl", sessionId: "grandchild-id", parentSessionId: "child-id", depth: 2, agentPath: "/root/research/tests", nickname: null, role: null, threadName: "Test task" },
+    ];
+    invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
+      if (command !== "fetch_session_detail") throw new Error(`Unexpected invoke: ${command}`);
+      return replayDetail({
+        path: args?.path ?? "/tmp/root.jsonl",
+        threadName: args?.path === "/tmp/child.jsonl" ? "Research task" : "Root task",
+        agents,
+      });
+    });
+
+    render(<SessionDetailModal session={session({ path: "/tmp/root.jsonl", threadName: "Root task" })} onClose={vi.fn()} />);
+
+    const hierarchy = await screen.findByRole("region", { name: "Agent hierarchy" });
+    expect(within(hierarchy).getByText("3 agents")).toBeInTheDocument();
+    const rootButton = within(hierarchy).getByRole("button", { name: /root.*Root task.*Root.*Current/ });
+    const childButton = within(hierarchy).getByRole("button", { name: /research.*Curie.*Research task.*Subagent/ });
+    const grandchildButton = within(hierarchy).getByRole("button", { name: /tests.*Test task.*Subagent/ });
+    expect(rootButton).toHaveStyle({ paddingLeft: "8px" });
+    expect(childButton).toHaveStyle({ paddingLeft: "32px" });
+    expect(grandchildButton).toHaveStyle({ paddingLeft: "56px" });
+
+    await userEvent.click(childButton);
+    expect(await screen.findByRole("dialog", { name: "Research task" })).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenLastCalledWith("fetch_session_detail", { path: "/tmp/child.jsonl" });
+  });
+
   it("shows complete quota windows and localized estimation guidance in session details", async () => {
     await i18n.changeLanguage("zh");
     invokeMock.mockResolvedValue({
@@ -631,18 +790,20 @@ describe("session titles", () => {
       resetsAt: "2026-07-15T13:00:00Z",
       observedStartAt: "2026-07-15T08:00:00Z",
       observedEndAt: "2026-07-15T09:00:00Z",
+      observedStartPercent: 10,
+      observedEndPercent: 14,
       observedDeltaPercent: 4,
       belowResolution: false,
     };
 
-    render(<SessionDetailModal session={session({ quotaUsage: { fiveHour: [quotaWindow, { ...quotaWindow, observedDeltaPercent: 2 }], weekly: [] } })} onClose={vi.fn()} />);
+    render(<SessionDetailModal session={session({ quotaUsage: { fiveHour: [quotaWindow, { ...quotaWindow, observedEndPercent: 12, observedDeltaPercent: 2 }], weekly: [] } })} onClose={vi.fn()} />);
 
     expect(await screen.findByText("观测到的限额消耗")).toBeInTheDocument();
     expect(screen.getByText("5h")).toBeInTheDocument();
     expect(screen.getByText("周")).toBeInTheDocument();
-    expect(screen.getByText("约 +4%")).toBeInTheDocument();
-    expect(screen.getByText("约 +2%")).toBeInTheDocument();
-    expect(screen.getByText(/取整及同时运行的其他 Codex 会话/)).toBeInTheDocument();
+    expect(screen.getByText("使用了 4% • 90% → 86%")).toBeInTheDocument();
+    expect(screen.getByText("使用了 2% • 90% → 88%")).toBeInTheDocument();
+    expect(screen.getByText(/列表显示最近一次观测快照时的剩余额度/)).toBeInTheDocument();
     await i18n.changeLanguage("en");
   });
 });

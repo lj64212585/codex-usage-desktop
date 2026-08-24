@@ -253,6 +253,8 @@ export type SessionQuotaWindowUsage = {
   resetsAt: string | null;
   observedStartAt: string;
   observedEndAt: string;
+  observedStartPercent: number;
+  observedEndPercent: number;
   observedDeltaPercent: number;
   belowResolution: boolean;
 };
@@ -266,6 +268,12 @@ export type SessionDetailRow = {
   path: string;
   sessionId: string;
   threadName: string | null;
+  agentSessionId?: string | null;
+  parentSessionId?: string | null;
+  agentDepth?: number;
+  agentPath?: string | null;
+  agentNickname?: string | null;
+  agentRole?: string | null;
   modifiedAtMs: number;
   sizeBytes: number;
   inputTokens: number;
@@ -291,6 +299,16 @@ export type SessionReplayDetail = {
   modifiedAtMs: number;
   sizeBytes: number;
   rawJsonl: string;
+  agents: Array<{
+    path: string;
+    sessionId: string;
+    parentSessionId: string | null;
+    depth: number;
+    agentPath: string;
+    nickname: string | null;
+    role: string | null;
+    threadName: string | null;
+  }>;
   summary: {
     startTime: string | null;
     endTime: string | null;

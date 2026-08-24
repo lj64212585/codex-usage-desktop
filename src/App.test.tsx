@@ -285,6 +285,19 @@ describe("App", () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it("retranslates the completed scan message when the language changes", async () => {
+    mockLoadedDashboard();
+
+    render(<App />);
+    await screen.findByText("Synced 1 days (1 cached, 0 parsed)");
+
+    await act(async () => {
+      await i18n.changeLanguage("zh");
+    });
+
+    expect(screen.getByText("已同步 1 天数据 (1 个缓存，0 个解析)")).toBeInTheDocument();
+  });
+
   it("rescans after returning from the background but skips limits when files are unchanged", async () => {
     let now = 10_000;
     vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -420,6 +433,28 @@ describe("App", () => {
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "fetch_codex_limits")).toHaveLength(2);
     });
+  });
+
+  it("shows string errors returned by a background rescan", async () => {
+    invokeMock.mockImplementation(async (command: string, args?: { range?: string }) => {
+      if (command === "fetch_codex_limits") {
+        return limits(80);
+      }
+      if (command === "scan_usage") {
+        return Promise.reject("cached quota schema mismatch");
+      }
+      if (command === "fetch_overview" && args?.range === "30d") {
+        return overview();
+      }
+      if (command === "check_for_updates") {
+        return { hasUpdate: false, currentVersion: "1.0.0", latestVersion: "1.0.0", latestTag: "v1.0.0", releaseName: null, releaseNotes: null, releaseUrl: "" };
+      }
+      throw new Error(`Unexpected invoke: ${command}`);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("cached quota schema mismatch")).toBeInTheDocument();
   });
 
   it("opens the external quota forecast when the forecast badge is clicked", async () => {
